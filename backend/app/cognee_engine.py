@@ -361,12 +361,29 @@ async def ingest_all(rebuild: bool = False,
         for doc in docs:
             ds = _dataset_for(doc.filename)
             datasets[doc.filename] = ds
-            await _with_retry(
-                lambda d=doc, s=ds: cognee.add(d.text, dataset_name=s, node_set=[d.filename])
+            file_path = DATA_DIR / doc.filename
+            batches = (
+                ingest.read_evidence_batches(file_path, batch_size=100)
+                if file_path.is_file()
+                else [doc]
             )
-
-        unique_datasets = sorted(set(datasets.values()))
-        await _with_retry(lambda: _cognify(unique_datasets))
+            for batch_doc in batches:
+                await _with_retry(
+                    lambda d=batch_doc, s=ds: cognee.add(
+                        d.text, dataset_name=s, node_set=[d.filename]
+                    )
+                )
+                await _with_retry(lambda s=ds: _cognify([s]))
+                # Incrementally merge into FalkorDB
+                try:
+                    from app.falkor_client import ping as falkor_ping, sync_nodes_and_edges
+                    from cognee.infrastructure.databases.graph import get_graph_engine
+                    if falkor_ping():
+                        engine = await get_graph_engine()
+                        n, e = await engine.get_graph_data()
+                        sync_nodes_and_edges(n, e)
+                except Exception as exc:
+                    log.warning("Incremental FalkorDB sync on %s: %s", doc.filename, exc)
 
         # Sync Cognee graph data to FalkorDB with full typed labels
         try:
@@ -448,17 +465,40 @@ async def materialize_case(case_id: str) -> dict:
             # burning the wait_for budget inside _with_retry's backoff - the
             # visible waiting loop below owns ALL rate-limit waiting, outside
             # the per-file timeout. Deadlock retries still happen inside.
-            async def _ingest_one(p: Path = path) -> None:
-                doc = ingest.read_evidence_file(p)
-                await _with_retry(
-                    lambda d=doc, ds=dataset: cognee.add(
-                        d.text, dataset_name=ds, node_set=[d.filename]
-                    ),
-                    raise_rate_limit=True,
-                )
-                await _with_retry(
-                    lambda ds=dataset: _cognify([ds]), raise_rate_limit=True
-                )
+            async def _ingest_one(p: Path = path, file_name: str = name) -> None:
+                docs = ingest.read_evidence_batches(p, batch_size=100)
+                log.info("Ingesting %s in %d batch(es)...", file_name, len(docs))
+                for idx, doc in enumerate(docs, 1):
+                    if case_id in _cancel_requested:
+                        log.info("Ingest cancelled mid-batches for %s", file_name)
+                        break
+                    if len(docs) > 1:
+                        log.info(
+                            "Processing %s batch %d/%d (%d chars)...",
+                            file_name, idx, len(docs), len(doc.text),
+                        )
+                    await _with_retry(
+                        lambda d=doc, ds=dataset: cognee.add(
+                            d.text, dataset_name=ds, node_set=[d.filename]
+                        ),
+                        raise_rate_limit=True,
+                    )
+                    await _with_retry(
+                        lambda ds=dataset: _cognify([ds]), raise_rate_limit=True
+                    )
+                    # Incrementally sync and merge the extracted graph data into FalkorDB
+                    try:
+                        from app.falkor_client import ping as falkor_ping, sync_nodes_and_edges
+                        from cognee.infrastructure.databases.graph import get_graph_engine
+                        if falkor_ping():
+                            engine = await get_graph_engine()
+                            n, e = await engine.get_graph_data()
+                            sync_nodes_and_edges(n, e)
+                    except Exception as exc:
+                        log.warning(
+                            "Incremental FalkorDB sync on %s batch %d: %s",
+                            file_name, idx, exc,
+                        )
 
             # Retry the SAME file through rate limits (visible "waiting" status,
             # queue paused behind it); real errors fail it and move on.

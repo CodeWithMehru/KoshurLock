@@ -87,39 +87,64 @@ def source_meta_for(filename: str) -> tuple[str, str]:
 # "field is value" rendering so drop-in files still work.
 # --------------------------------------------------------------------------- #
 def _vpn_row(r: dict) -> str:
+    ts = r.get("timestamp") or r.get("Timestamp") or r.get("datetime") or r.get("Date") or ""
+    user = r.get("user") or r.get("User") or r.get("username") or r.get("Username") or "unknown"
+    ip = r.get("source_ip") or r.get("Source_IP") or r.get("src_ip") or r.get("ip") or r.get("IP") or "unknown"
+    loc = r.get("location") or r.get("Location") or "unknown"
+    status = r.get("status") or r.get("Status") or r.get("result") or r.get("Result") or "UNKNOWN"
+    sess = r.get("session_id") or r.get("Session_ID") or r.get("session") or "-"
     return (
-        f"At {r['timestamp']}, user '{r['user']}' had a VPN login attempt from "
-        f"IP {r['source_ip']} (location: {r['location']}); result: {r['status']}"
-        f" (session {r['session_id']})."
+        f"At {ts}, user '{user}' had a VPN login attempt from "
+        f"IP {ip} (location: {loc}); result: {status}"
+        f" (session {sess})."
     )
 
 
 def _file_row(r: dict) -> str:
+    ts = r.get("timestamp") or r.get("Timestamp") or ""
+    user = r.get("user") or r.get("User") or "unknown"
+    action = r.get("action") or r.get("Action") or "accessed"
+    fn = r.get("filename") or r.get("Filename") or r.get("file") or "unknown"
+    host = r.get("host") or r.get("Host") or "unknown"
+    sess = r.get("session_id") or r.get("Session_ID") or "-"
     return (
-        f"At {r['timestamp']}, user '{r['user']}' performed a {r['action']} action "
-        f"on file '{r['filename']}' on host {r['host']} (session {r['session_id']})."
+        f"At {ts}, user '{user}' performed a {action} action "
+        f"on file '{fn}' on host {host} (session {sess})."
     )
 
 
 def _email_row(r: dict) -> str:
+    ts = r.get("timestamp") or r.get("Timestamp") or ""
+    sender = r.get("sender") or r.get("Sender") or r.get("from") or "unknown"
+    recip = r.get("recipient") or r.get("Recipient") or r.get("to") or "unknown"
+    subj = r.get("subject") or r.get("Subject") or ""
+    size = r.get("attachment_size_mb") or r.get("size_mb") or "0"
     return (
-        f"At {r['timestamp']}, an email was sent from {r['sender']} to "
-        f"{r['recipient']} with subject '{r['subject']}' and an attachment of "
-        f"{r['attachment_size_mb']} MB."
+        f"At {ts}, an email was sent from {sender} to "
+        f"{recip} with subject '{subj}' and an attachment of "
+        f"{size} MB."
     )
 
 
 def _badge_row(r: dict) -> str:
+    ts = r.get("timestamp") or r.get("Timestamp") or ""
+    emp = r.get("employee") or r.get("Employee") or r.get("user") or "unknown"
+    direction = r.get("direction") or r.get("Direction") or "in"
+    door = r.get("door") or r.get("Door") or "main"
     return (
-        f"At {r['timestamp']}, employee {r['employee']} badged {r['direction']} "
-        f"at the '{r['door']}' access point."
+        f"At {ts}, employee {emp} badged {direction} "
+        f"at the '{door}' access point."
     )
 
 
 def _cctv_row(r: dict) -> str:
+    ts = r.get("timestamp") or r.get("Timestamp") or ""
+    cam = r.get("camera_id") or r.get("Camera_ID") or "CAM-01"
+    zone = r.get("zone") or r.get("Zone") or "General"
+    person = r.get("detected_person") or r.get("person") or "unknown"
     return (
-        f"At {r['timestamp']}, CCTV camera {r['camera_id']} in zone "
-        f"'{r['zone']}' detected {r['detected_person']}."
+        f"At {ts}, CCTV camera {cam} in zone "
+        f"'{zone}' detected {person}."
     )
 
 
@@ -130,6 +155,23 @@ _CSV_TEMPLATES: dict[str, Callable[[dict], str]] = {
     "badge_logs.csv": _badge_row,
     "cctv_events.csv": _cctv_row,
 }
+
+
+def _get_csv_template(filename: str) -> Callable[[dict], str]:
+    if filename in _CSV_TEMPLATES:
+        return _CSV_TEMPLATES[filename]
+    fn_lower = filename.lower()
+    if "vpn" in fn_lower:
+        return _vpn_row
+    if "file" in fn_lower:
+        return _file_row
+    if "email" in fn_lower:
+        return _email_row
+    if "badge" in fn_lower:
+        return _badge_row
+    if "cctv" in fn_lower:
+        return _cctv_row
+    return _generic_row
 
 
 # A column whose name or value looks like a timestamp, so an arbitrary uploaded
@@ -166,18 +208,49 @@ def _generic_row(r: dict) -> str:
     return "Record: " + body + "."
 
 
+DEFAULT_LOG_BATCH_SIZE = 100
+
+
 def csv_to_narrative(path: Path) -> str:
     """Render a CSV as one natural-language sentence per row (header-aware)."""
-    template = _CSV_TEMPLATES.get(path.name, _generic_row)
+    template = _get_csv_template(path.name)
     lines: list[str] = []
     with path.open(newline="", encoding="utf-8") as fh:
         for row in csv.DictReader(fh):
             try:
-                lines.append(template(row))
-            except KeyError:
-                # Header didn't match the specific template - degrade gracefully.
-                lines.append(_generic_row(row))
+                line = template(row)
+            except Exception:
+                line = _generic_row(row)
+            if line and line.strip():
+                lines.append(line.strip())
     return "\n".join(lines)
+
+
+def csv_to_narrative_batches(
+    path: Path, batch_size: int = DEFAULT_LOG_BATCH_SIZE
+) -> list[str]:
+    """Render a CSV as natural-language sentences grouped into batches of rows.
+
+    Processing logs in smaller chunks (100-200 rows) prevents LLM output token
+    limit exhaustion during entity/relationship extraction.
+    """
+    template = _get_csv_template(path.name)
+    batches: list[str] = []
+    current_batch: list[str] = []
+    with path.open(newline="", encoding="utf-8") as fh:
+        for row in csv.DictReader(fh):
+            try:
+                line = template(row)
+            except Exception:
+                line = _generic_row(row)
+            if line and line.strip():
+                current_batch.append(line.strip())
+            if len(current_batch) >= batch_size:
+                batches.append("\n".join(current_batch))
+                current_batch = []
+    if current_batch:
+        batches.append("\n".join(current_batch))
+    return batches or [""]
 
 
 def _pdf_to_text(path: Path) -> str:
@@ -244,6 +317,33 @@ def read_evidence_file(path: Path) -> EvidenceDoc:
         reliability=reliability,
         text=_wrap(path.name, source_type, reliability, body),
     )
+
+
+def read_evidence_batches(
+    path: Path, batch_size: int = DEFAULT_LOG_BATCH_SIZE
+) -> list[EvidenceDoc]:
+    """Read one file into one or more provenance-wrapped :class:`EvidenceDoc` batches.
+
+    For CSVs (especially dense logs like vpn_logs.csv), chunks rows into batches of
+    `batch_size` rows (default 100) so that entity and relationship extraction stays
+    strictly within model output/completion token limits. Non-CSV files return a single
+    EvidenceDoc.
+    """
+    source_type, reliability = source_meta_for(path.name)
+    suffix = path.suffix.lower()
+    if suffix == ".csv":
+        batches = csv_to_narrative_batches(path, batch_size=batch_size)
+        return [
+            EvidenceDoc(
+                filename=path.name,
+                source_type=source_type,
+                reliability=reliability,
+                text=_wrap(path.name, source_type, reliability, b),
+            )
+            for b in batches
+            if b.strip()
+        ]
+    return [read_evidence_file(path)]
 
 
 def load_all_evidence(data_dir: Path | str = DATA_DIR) -> list[EvidenceDoc]:
