@@ -129,6 +129,15 @@ def load_env() -> None:
     """
     load_dotenv(BACKEND_ROOT.parent / ".env", override=False)
 
+    falkor_host = os.environ.get("FALKORDB_HOST")
+    if falkor_host:
+        os.environ.setdefault("VECTOR_DB_URL", falkor_host)
+        os.environ.setdefault("GRAPH_DATABASE_URL", falkor_host)
+    falkor_port = os.environ.get("FALKORDB_PORT")
+    if falkor_port:
+        os.environ.setdefault("VECTOR_DB_PORT", falkor_port)
+        os.environ.setdefault("GRAPH_DATABASE_PORT", falkor_port)
+
     for key, value in _DEFAULTS.items():
         os.environ.setdefault(key, value)
 

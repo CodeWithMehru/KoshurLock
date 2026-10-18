@@ -8,7 +8,9 @@ engine (which imports cognee) and the routers.
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 # 1) Environment + no-OpenAI guard, before cognee is imported anywhere.
 from .settings import configure
@@ -19,6 +21,7 @@ configure(verbose=True)
 from fastapi import FastAPI, Request  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import JSONResponse  # noqa: E402
+from starlette.staticfiles import StaticFiles  # noqa: E402
 
 from . import cognee_engine, restore  # noqa: E402
 from .routers import cases, graph, investigate, meta, remember  # noqa: E402
@@ -66,11 +69,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Root paths (direct / legacy / compose nginx proxy)
 app.include_router(remember.router)
 app.include_router(investigate.router)
 app.include_router(graph.router)
 app.include_router(meta.router)
 app.include_router(cases.router)
+
+# /api prefixed paths (matching frontend/src/lib/api.ts which calls /api/...)
+app.include_router(remember.router, prefix="/api")
+app.include_router(investigate.router, prefix="/api")
+app.include_router(graph.router, prefix="/api")
+app.include_router(meta.router, prefix="/api")
+app.include_router(cases.router, prefix="/api")
 
 
 @app.exception_handler(Exception)
@@ -82,8 +93,9 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     )
 
 
-@app.get("/", tags=["meta"])
-async def root() -> dict:
+@app.get("/api", tags=["meta"])
+@app.get("/api/", tags=["meta"])
+async def api_catalog() -> dict:
     return {
         "name": "KoshurLock Holmes",
         "ops": {
@@ -98,3 +110,26 @@ async def root() -> dict:
         "cases": ["GET /cases", "POST /cases", "POST /cases/{id}/files",
                   "POST /cases/{id}/ingest", "POST /cases/{id}/open"],
     }
+
+
+def _find_static_dir() -> Path | None:
+    candidates = [
+        Path(os.environ.get("STATIC_DIR", "/app/static")),
+        Path("/app/static"),
+        Path(__file__).resolve().parent.parent / "static",
+        Path(__file__).resolve().parent.parent.parent / "frontend" / "dist",
+    ]
+    for c in candidates:
+        if c.is_dir() and (c / "index.html").is_file():
+            return c
+    return None
+
+
+_static_dir = _find_static_dir()
+if _static_dir:
+    log.info("Mounting built frontend static files from %s at /", _static_dir)
+    app.mount("/", StaticFiles(directory=str(_static_dir), html=True), name="static")
+else:
+    @app.get("/", tags=["meta"])
+    async def root() -> dict:
+        return await api_catalog()

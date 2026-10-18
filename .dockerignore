@@ -1,0 +1,26 @@
+# Git and secrets
+.git
+.env
+*.env
+*.env.local
+
+# Python artifacts and caches
+.venv
+venv
+__pycache__
+*.py[cod]
+backend/__pycache__
+backend/.cognee_system
+backend/.cognee_system_smoke
+backend/.fastembed_cache
+
+# Node artifacts
+frontend/node_modules
+frontend/dist
+frontend/.vite
+frontend/node_modules/.tmp
+
+# System and logs
+.DS_Store
+Thumbs.db
+task-*.log
