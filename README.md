@@ -230,9 +230,9 @@ Screenshots are placeholders; drop the captured images into `docs/img/` to popul
 
 ### Demo
 
-▶️ **[Watch the demo on YouTube](https://youtu.be/andctA1DQ_M?si=d9DBhyp3lwsundC1)**
+▶️ **[Watch the demo on YouTube](https://youtu.be/S549w7txR9E?si=13391K6940y-efbC)**
 
-[![Watch the demo](docs/img/koshurlock.png)](https://youtu.be/andctA1DQ_M?si=d9DBhyp3lwsundC1)
+[![Watch the demo](docs/img/koshurlock.png)](https://youtu.be/S549w7txR9E?si=13391K6940y-efbC)
 
 ## Documentation
 
